@@ -1,5 +1,5 @@
 name: "Setup Playwright PHP"
-description: "Install the Playwright JS library and download the browsers you need (default: chrome). Made for PlaywrightPHP."
+description: "Install the Playwright JS library and selected browser targets. Made for Playwright PHP."
 author: "playwright-php"
 branding:
   icon: "download"
@@ -11,9 +11,8 @@ inputs:
     required: false
     default: "latest"
   browsers:
-    description: 'Browsers as a JSON array (["chrome","firefox"]), "all", or a single string like "chrome". Allowed: chrome, chromium, firefox, webkit, msedge.'
+    description: 'Browser installation targets as "all", one name, or a JSON array. Omitting this input is deprecated and currently falls back to chrome.'
     required: false
-    default: "chrome"
   browsers-path:
     description: "Optional custom directory to store browser binaries (sets PLAYWRIGHT_BROWSERS_PATH)."
     required: false
@@ -39,60 +38,9 @@ runs:
       shell: bash
       env:
         INPUT_BROWSERS: ${{ inputs.browsers }}
-        RUNNER_OS: ${{ runner.os }}
       run: |
         set -euo pipefail
-        node - <<'NODE'
-        const fs = require('fs');
-        const out = process.env.GITHUB_OUTPUT;
-        const raw = (process.env.INPUT_BROWSERS ?? 'chrome').trim();
-        const os = process.env.RUNNER_OS || '';
-        const allowed = new Set(['chrome','chromium','firefox','webkit','msedge']);
-
-        // "all" shortcut
-        if (raw.toLowerCase() === 'all') {
-          fs.appendFileSync(out, 'cli=all\njson=["chromium","firefox","webkit"]\n');
-          process.exit(0);
-        }
-
-        // Try JSON first
-        let arr;
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            arr = parsed;
-          } else if (typeof parsed === 'string') {
-            // Allow a single string JSON, e.g. "chrome"
-            arr = [parsed];
-          } else {
-            throw new Error();
-          }
-        } catch {
-          // Fall back to treating raw as a single browser token
-          arr = [raw];
-        }
-
-        const norm = [];
-        for (const v of arr.map(x => String(x).trim().toLowerCase()).filter(Boolean)) {
-          if (!allowed.has(v)) {
-            console.error(`Invalid browser "${v}". Allowed: ${Array.from(allowed).join(', ')}, or "all".`);
-            process.exit(1);
-          }
-          if (v === 'msedge' && os !== 'Windows') {
-            console.error(`"msedge" can only be installed on Windows runners (current: ${os}).`);
-            process.exit(1);
-          }
-          if (!norm.includes(v)) norm.push(v);
-        }
-        if (norm.length === 0) {
-          console.error('At least one browser must be specified.');
-          process.exit(1);
-        }
-
-        const cli = norm.join(' ');
-        const json = JSON.stringify(norm);
-        fs.appendFileSync(out, `cli=${cli}\njson=${json}\n`);
-        NODE
+        node "$GITHUB_ACTION_PATH/scripts/resolve-browsers.cjs"
 
     - name: Compute --with-deps (tiny)
       id: flags
@@ -150,7 +98,7 @@ runs:
         WITH_DEPS: ${{ steps.flags.outputs.with_deps }}
       run: |
         set -euo pipefail
-        if [ "$CLI" = "all" ]; then
+        if [ -z "$CLI" ]; then
           echo "Installing all default Playwright browsers (chromium, firefox, webkit)..."
           set -x
           playwright install $WITH_DEPS
