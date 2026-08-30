@@ -1,4 +1,5 @@
 name: CI - Action tests
+
 on:
   push:
     branches:
@@ -8,108 +9,144 @@ on:
   workflow_dispatch:
 
 jobs:
-  matrix-smoke:
-    name: Smoke (${{ matrix.os }} · ${{ matrix.browser }})
+  input-contract:
+    name: Browser input contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node --test tests/*.test.cjs
+
+  legacy-default:
+    name: Deprecated Chrome fallback
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the deprecated browser fallback
+        id: setup
+        uses: ./
+
+      - name: Verify resolved browsers
+        shell: bash
+        env:
+          INSTALLED_BROWSERS: ${{ steps.setup.outputs.installed-browsers }}
+        run: test "$INSTALLED_BROWSERS" = '["chrome"]'
+
+      - name: Verify Playwright installation
+        shell: bash
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.setup.outputs.playwright-version }}
+        run: |
+          set -euo pipefail
+          playwright --version
+          test -n "$PLAYWRIGHT_VERSION"
+          test "$PLAYWRIGHT_VERSION" != "unknown"
+          node -e "console.log(require('playwright/package.json').version)"
+
+      - name: Launch the fallback Chrome browser
+        shell: bash
+        run: |
+          node - <<'JS'
+          const { chromium } = require('playwright');
+
+          (async () => {
+            const browser = await chromium.launch({ channel: 'chrome', headless: true });
+            const page = await browser.newPage();
+            await page.goto('https://example.com');
+            console.log(await page.title());
+            await browser.close();
+          })().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          JS
+
+  managed-browser-smoke:
+    name: Managed browser (${{ matrix.browser }} on ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        browser: [chrome, firefox, webkit]
+        include:
+          - os: ubuntu-latest
+            browser: chromium
+          - os: macos-latest
+            browser: webkit
+          - os: windows-latest
+            browser: firefox
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use local action to install Playwright + selected browser
+      - name: Install the selected managed browser
         id: setup
         uses: ./
         with:
           browsers: ${{ matrix.browser }}
-          with-deps: auto
 
-      - name: Verify CLI and installed version
-        shell: bash
-        run: |
-          set -euo pipefail
-          playwright --version
-          echo "Action reported version: ${{ steps.setup.outputs['playwright-version'] }}"
-          echo "Installed browsers: ${{ steps.setup.outputs['installed-browsers'] }}"
-
-      - name: Install local Playwright package (without re-downloading browsers)
+      - name: Launch the selected managed browser
         shell: bash
         env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          BROWSER: ${{ matrix.browser }}
+          INSTALLED_BROWSERS: ${{ steps.setup.outputs.installed-browsers }}
         run: |
-          set -euo pipefail
-          V="${{ steps.setup.outputs['playwright-version'] }}"
-          if [ -z "$V" ] || [ "$V" = "unknown" ]; then
-            V="latest"
-          fi
-          npm init -y >/dev/null 2>&1 || true
-          npm i -D --no-fund --no-audit "playwright@$V"
-          node -e "console.log('Local playwright version:', require('playwright/package.json').version)"
+          test "$INSTALLED_BROWSERS" = "[\"$BROWSER\"]"
+          node - <<'JS'
+          const { chromium, firefox, webkit } = require('playwright');
+          const browserType = { chromium, firefox, webkit }[process.env.BROWSER];
 
-      - name: Smoke run - Launch ${{ matrix.browser }} headless and fetch title
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > smoke.js <<'JS'
-          const {chromium, firefox, webkit} = require('playwright');
-          const target = process.env.BROWSER;
           (async () => {
-            let browser;
-            if (target === 'chrome') {
-              browser = await chromium.launch({channel: 'chrome', headless: true});
-            } else if (target === 'firefox') {
-              browser = await firefox.launch({headless: true});
-            } else if (target === 'webkit') {
-              browser = await webkit.launch({headless: true});
-            } else if (target === 'chromium') {
-              browser = await chromium.launch({headless: true});
-            } else if (target === 'msedge') {
-              browser = await chromium.launch({channel: 'msedge', headless: true});
-            } else {
-              throw new Error('Unsupported BROWSER: ' + target);
-            }
+            const browser = await browserType.launch({ headless: true });
             const page = await browser.newPage();
             await page.goto('https://example.com');
-            const title = await page.title();
-            console.log('TITLE=' + title);
+            console.log(await page.title());
             await browser.close();
-          })().catch(err => {
-            console.error(err);
+          })().catch(error => {
+            console.error(error);
             process.exit(1);
           });
           JS
-          node smoke.js
+
+  branded-browser-smoke:
+    name: Branded browser (${{ matrix.browser }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            browser: chrome
+          - os: windows-latest
+            browser: msedge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the selected branded browser
+        uses: ./
+        with:
+          browsers: ${{ matrix.browser }}
+
+      - name: Launch the selected branded browser
+        shell: bash
         env:
           BROWSER: ${{ matrix.browser }}
-
-  edge-windows:
-    name: Edge smoke (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./
-        with:
-          browsers: msedge
-      - name: Launch msedge
-        shell: bash
         run: |
-          node -e "const {chromium}=require('playwright');(async()=>{const b=await chromium.launch({channel:'msedge',headless:true});const p=await b.newPage();await p.goto('https://example.com');console.log(await p.title());await b.close()})()"
+          node - <<'JS'
+          const { chromium } = require('playwright');
 
-  chromium-linux:
-    name: Chromium smoke (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./
-        with:
-          browsers: chromium
-          with-deps: true
-      - name: Launch chromium
-        shell: bash
-        run: |
-          node -e "const {chromium}=require('playwright');(async()=>{const b=await chromium.launch({headless:true});const p=await b.newPage();await p.goto('https://example.com');console.log(await p.title());await b.close()})()"
+          (async () => {
+            const browser = await chromium.launch({ channel: process.env.BROWSER, headless: true });
+            const page = await browser.newPage();
+            await page.goto('https://example.com');
+            console.log(await page.title());
+            await browser.close();
+          })().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          JS
 
   invalid-input:
     name: Invalid input should fail
